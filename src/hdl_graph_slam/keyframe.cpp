@@ -26,6 +26,8 @@ void KeyFrame::save(const std::string& directory) {
   std::ofstream ofs(directory + "/data");
   ofs << "stamp " << stamp.sec << " " << stamp.nsec << "\n";
 
+  ofs << std::fixed << std::setprecision(16);
+
   ofs << "estimate\n";
   ofs << node->estimate().matrix() << "\n";
 
@@ -40,6 +42,10 @@ void KeyFrame::save(const std::string& directory) {
 
   if(utm_coord) {
     ofs << "utm_coord " << utm_coord->transpose() << "\n";
+  }
+
+  if(lla_coord) {
+    ofs << "lla_coord " << lla_coord->transpose() << "\n";
   }
 
   if(acceleration) {

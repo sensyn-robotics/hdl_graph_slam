@@ -328,7 +328,7 @@ private:
       geodesy::UTMPoint utm;
       geodesy::fromMsg((*closest_gps)->position, utm);
       Eigen::Vector3d xyz(utm.easting, utm.northing, utm.altitude);
-
+      Eigen::Vector3d lla((*closest_gps)->position.latitude, (*closest_gps)->position.longitude, (*closest_gps)->position.altitude);
       // the first gps data position will be the origin of the map
       if(!zero_utm) {
         zero_utm = xyz;
@@ -336,6 +336,7 @@ private:
       xyz -= (*zero_utm);
 
       keyframe->utm_coord = xyz;
+      keyframe->lla_coord = lla;
 
       g2o::OptimizableGraph::Edge* edge;
       if(std::isnan(xyz.z())) {
@@ -808,7 +809,6 @@ private:
     return markers;
   }
 
-
   /**
    * @brief load all data from a directory
    * @param req
@@ -921,7 +921,6 @@ private:
 
     return true;
   }
-
 
   /**
    * @brief dump all data to the current directory

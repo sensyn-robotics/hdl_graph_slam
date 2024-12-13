@@ -4,8 +4,8 @@ project(hdl_graph_slam)
 
 # Can we use C++17 in indigo?
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-  add_definitions(-std=c++11)
-  set(CMAKE_CXX_FLAGS "-std=c++11")
+  add_definitions(-std=c++14)
+  set(CMAKE_CXX_FLAGS "-std=c++14")
 else()
   add_definitions(-std=c++14 -msse -msse2 -msse3 -msse4 -msse4.1 -msse4.2)
   set(CMAKE_CXX_FLAGS "-std=c++14 -msse -msse2 -msse3 -msse4 -msse4.1 -msse4.2")
