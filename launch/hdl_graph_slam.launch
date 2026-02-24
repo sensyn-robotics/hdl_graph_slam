@@ -7,6 +7,20 @@
   <arg name="enable_imu_acc" default="false" />
   <arg name="enable_imu_ori" default="false" />
 
+  <!-- GPS origin mode selection -->
+  <arg name="gps_origin_mode" default="utm"
+       doc="GPS coordinate origin mode: 'utm' or 'base_point'"/>
+
+  <!-- GNSS antenna offset from drone_base (in drone_base frame) -->
+  <!-- These values represent the offset from drone_base to GNSS antenna -->
+  <!-- Default values are for DJI M300 RTK: gnss→drone_base = [+0.3, +0.3, 0.0]m -->
+  <arg name="gnss_antenna_offset_x" default="0.3"
+       doc="GNSS antenna offset X (forward, meters)"/>
+  <arg name="gnss_antenna_offset_y" default="0.3"
+       doc="GNSS antenna offset Y (left, meters)"/>
+  <arg name="gnss_antenna_offset_z" default="0.0"
+       doc="GNSS antenna offset Z (up, meters)"/>
+
   <!-- hdl_graph_slam will publish its estimated pose from odom to base_link within the following structure -->
   <!-- ***** map -> odom -> base_link -> velodyne ***** -->
   <!-- these can be named in the following -->
@@ -140,6 +154,12 @@
     <param name="gps_edge_robust_kernel_size" value="1.0" />
     <param name="gps_edge_stddev_xy" value="20.0" />
     <param name="gps_edge_stddev_z" value="5.0" />
+    <!-- GPS origin mode (base_point coordinates set via /elas/base_point_* parameters) -->
+    <param name="gps_origin_mode" value="$(arg gps_origin_mode)" />
+    <!-- GNSS antenna offset (gnss → drone_base in drone_base frame) -->
+    <param name="gnss_antenna_offset_x" value="$(arg gnss_antenna_offset_x)" />
+    <param name="gnss_antenna_offset_y" value="$(arg gnss_antenna_offset_y)" />
+    <param name="gnss_antenna_offset_z" value="$(arg gnss_antenna_offset_z)" />
     <!-- IMU orientation -->
     <param name="imu_orientation_edge_robust_kernel" value="NONE" />
     <param name="imu_orientation_edge_stddev" value="1.0" />

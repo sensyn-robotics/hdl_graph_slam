@@ -48,12 +48,36 @@ void KeyFrame::save(const std::string& directory) {
     ofs << "lla_coord " << lla_coord->transpose() << "\n";
   }
 
+  if(utm_coord_interpolated) {
+    ofs << "utm_coord_interpolated " << utm_coord_interpolated->transpose() << "\n";
+  }
+
+  if(lla_coord_interpolated) {
+    ofs << "lla_coord_interpolated " << lla_coord_interpolated->transpose() << "\n";
+  }
+
   if(acceleration) {
     ofs << "acceleration " << acceleration->transpose() << "\n";
   }
 
   if(orientation) {
     ofs << "orientation " << orientation->w() << " " << orientation->x() << " " << orientation->y() << " " << orientation->z() << "\n";
+  }
+
+  if(rtk_yaw) {
+    ofs << "rtk_yaw " << *rtk_yaw << "\n";
+  }
+
+  if(gps_timestamp) {
+    ofs << "gps_timestamp " << gps_timestamp->sec << " " << gps_timestamp->nsec << "\n";
+  }
+
+  if(gps_timestamp_before) {
+    ofs << "gps_timestamp_before " << gps_timestamp_before->sec << " " << gps_timestamp_before->nsec << "\n";
+  }
+
+  if(gps_timestamp_after) {
+    ofs << "gps_timestamp_after " << gps_timestamp_after->sec << " " << gps_timestamp_after->nsec << "\n";
   }
 
   if(node) {
@@ -109,6 +133,18 @@ bool KeyFrame::load(const std::string& directory, g2o::HyperGraph* graph) {
       Eigen::Vector3d coord;
       ifs >> coord[0] >> coord[1] >> coord[2];
       utm_coord = coord;
+    } else if(token == "lla_coord") {
+      Eigen::Vector3d coord;
+      ifs >> coord[0] >> coord[1] >> coord[2];
+      lla_coord = coord;
+    } else if(token == "utm_coord_interpolated") {
+      Eigen::Vector3d coord;
+      ifs >> coord[0] >> coord[1] >> coord[2];
+      utm_coord_interpolated = coord;
+    } else if(token == "lla_coord_interpolated") {
+      Eigen::Vector3d coord;
+      ifs >> coord[0] >> coord[1] >> coord[2];
+      lla_coord_interpolated = coord;
     } else if(token == "acceleration") {
       Eigen::Vector3d acc;
       ifs >> acc[0] >> acc[1] >> acc[2];
@@ -117,6 +153,22 @@ bool KeyFrame::load(const std::string& directory, g2o::HyperGraph* graph) {
       Eigen::Quaterniond quat;
       ifs >> quat.w() >> quat.x() >> quat.y() >> quat.z();
       orientation = quat;
+    } else if(token == "rtk_yaw") {
+      double yaw;
+      ifs >> yaw;
+      rtk_yaw = yaw;
+    } else if(token == "gps_timestamp") {
+      ros::Time t;
+      ifs >> t.sec >> t.nsec;
+      gps_timestamp = t;
+    } else if(token == "gps_timestamp_before") {
+      ros::Time t;
+      ifs >> t.sec >> t.nsec;
+      gps_timestamp_before = t;
+    } else if(token == "gps_timestamp_after") {
+      ros::Time t;
+      ifs >> t.sec >> t.nsec;
+      gps_timestamp_after = t;
     } else if(token == "id") {
       ifs >> node_id;
     }

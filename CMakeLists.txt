@@ -30,6 +30,8 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   std_msgs
   tf_conversions
+  tf2
+  tf2_geometry_msgs
 )
 catkin_python_setup()
 
@@ -52,6 +54,14 @@ if (OPENMP_FOUND)
     set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
     set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 endif()
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PROJ REQUIRED proj)
+if(NOT PROJ_FOUND)
+    message(FATAL_ERROR "PROJ library not found. Install libproj-dev")
+endif()
+message(STATUS "PROJ_INCLUDE_DIRS:" ${PROJ_INCLUDE_DIRS})
+message(STATUS "PROJ_LIBRARIES:" ${PROJ_LIBRARIES})
 
 find_library(VGICP_CUDA_FOUND NAMES fast_vgicp_cuda)
 message(STATUS "VGICP_CUDA_FOUND:" ${VGICP_CUDA_FOUND})
@@ -89,6 +99,8 @@ catkin_package(
     sensor_msgs
     std_msgs
     tf_conversions
+    tf2
+    tf2_geometry_msgs
 #  DEPENDS system_lib
 )
 
@@ -99,6 +111,7 @@ include_directories(include)
 include_directories(
   ${PCL_INCLUDE_DIRS}
   ${catkin_INCLUDE_DIRS}
+  ${PROJ_INCLUDE_DIRS}
 )
 
 # nodelets
@@ -135,6 +148,7 @@ add_library(hdl_graph_slam_nodelet
   src/hdl_graph_slam/map_cloud_generator.cpp
   src/hdl_graph_slam/registrations.cpp
   src/hdl_graph_slam/information_matrix_calculator.cpp
+  src/hdl_graph_slam/base_point_transformer.cpp
   src/g2o/robust_kernel_io.cpp
 )
 target_link_libraries(hdl_graph_slam_nodelet
@@ -148,6 +162,7 @@ target_link_libraries(hdl_graph_slam_nodelet
   ${G2O_SOLVER_CHOLMOD}   # be aware of that cholmod is released under GPL
   ${G2O_TYPES_SLAM3D}
   ${G2O_TYPES_SLAM3D_ADDONS}
+  ${PROJ_LIBRARIES}
 )
 add_dependencies(hdl_graph_slam_nodelet ${PROJECT_NAME}_gencpp)
 

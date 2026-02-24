@@ -23,8 +23,13 @@
 #include <message_filters/sync_policies/approximate_time.h>
 #include <tf_conversions/tf_eigen.h>
 #include <tf/transform_listener.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
 #include <std_msgs/Time.h>
+#include <std_msgs/Int16.h>
+#include <geometry_msgs/QuaternionStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <nmea_msgs/Sentence.h>
 #include <sensor_msgs/Imu.h>
@@ -44,6 +49,7 @@
 #include <hdl_graph_slam/ros_utils.hpp>
 #include <hdl_graph_slam/ros_time_hash.hpp>
 
+#include <hdl_graph_slam/base_point_transformer.hpp>
 #include <hdl_graph_slam/graph_slam.hpp>
 #include <hdl_graph_slam/keyframe.hpp>
 #include <hdl_graph_slam/keyframe_updater.hpp>
@@ -98,6 +104,51 @@ public:
     gps_time_offset = private_nh.param<double>("gps_time_offset", 0.0);
     gps_edge_stddev_xy = private_nh.param<double>("gps_edge_stddev_xy", 10000.0);
     gps_edge_stddev_z = private_nh.param<double>("gps_edge_stddev_z", 10.0);
+
+    // GPS origin mode configuration
+    gps_origin_mode_ = private_nh.param<std::string>("gps_origin_mode", "utm");
+    ROS_INFO_STREAM("GPS origin mode: " << gps_origin_mode_);
+
+    if (gps_origin_mode_ == "base_point") {
+        // Read base_point parameters from global namespace
+        // Try without /elas/ prefix first, then fall back to /elas/ prefix for backward compatibility
+        bool params_loaded = false;
+
+        if (nh.getParam("/base_point_latitude", base_point_latitude_) &&
+            nh.getParam("/base_point_longitude", base_point_longitude_) &&
+            nh.getParam("/base_point_altitude", base_point_altitude_)) {
+            params_loaded = true;
+            ROS_INFO("Loaded base_point parameters from /base_point_*");
+        } else if (nh.getParam("/elas/base_point_latitude", base_point_latitude_) &&
+                   nh.getParam("/elas/base_point_longitude", base_point_longitude_) &&
+                   nh.getParam("/elas/base_point_altitude", base_point_altitude_)) {
+            params_loaded = true;
+            ROS_INFO("Loaded base_point parameters from /elas/base_point_*");
+        }
+
+        if (!params_loaded) {
+            ROS_FATAL("base_point origin mode requires /base_point_* or /elas/base_point_* parameters");
+            exit(1);
+        }
+
+        // Initialize BasePointTransformer
+        base_point_transformer_.reset(new BasePointTransformer(
+            base_point_latitude_, base_point_longitude_, base_point_altitude_));
+
+        ROS_INFO("GPS origin mode: base_point initialized at (%.10f, %.10f, %.10f)",
+                 base_point_latitude_, base_point_longitude_, base_point_altitude_);
+    }
+
+    // GNSS antenna offset configuration
+    // Offset from drone_base to GNSS antenna in drone_base frame
+    // drone_base → gnss = [-x, -y, -z] means gnss → drone_base = [+x, +y, +z]
+    double gnss_offset_x = private_nh.param<double>("gnss_antenna_offset_x", 0.3);
+    double gnss_offset_y = private_nh.param<double>("gnss_antenna_offset_y", 0.3);
+    double gnss_offset_z = private_nh.param<double>("gnss_antenna_offset_z", 0.0);
+    gnss_antenna_offset << gnss_offset_x, gnss_offset_y, gnss_offset_z;
+    ROS_INFO("GNSS antenna offset (gnss→drone_base): [%.2f, %.2f, %.2f]m",
+             gnss_offset_x, gnss_offset_y, gnss_offset_z);
+
     floor_edge_stddev = private_nh.param<double>("floor_edge_stddev", 10.0);
 
     imu_time_offset = private_nh.param<double>("imu_time_offset", 0.0);
@@ -120,6 +171,11 @@ public:
       gps_sub = mt_nh.subscribe("/gps/geopoint", 1024, &HdlGraphSlamNodelet::gps_callback, this);
       nmea_sub = mt_nh.subscribe("/gpsimu_driver/nmea_sentence", 1024, &HdlGraphSlamNodelet::nmea_callback, this);
       navsat_sub = mt_nh.subscribe("/gps/navsat", 1024, &HdlGraphSlamNodelet::navsat_callback, this);
+
+      // RTK Yaw subscriber for GNSS antenna offset compensation
+      rtk_yaw_sub = mt_nh.subscribe("/dji_osdk_ros/attitude", 10,
+                                     &HdlGraphSlamNodelet::rtk_yaw_callback, this);
+      ROS_INFO("RTK yaw subscriber initialized for GNSS compensation");
     }
 
     // publishers
@@ -172,6 +228,14 @@ private:
 
     double accum_d = keyframe_updater->get_accum_distance();
     KeyFrame::Ptr keyframe(new KeyFrame(stamp, odom, accum_d, cloud));
+
+    // Set RTK yaw to keyframe (ROS ENU: 0=East, clockwise)
+    {
+      std::lock_guard<std::mutex> lock(rtk_yaw_mutex);
+      if(latest_rtk_yaw_rad) {
+        keyframe->rtk_yaw = *latest_rtk_yaw_rad;
+      }
+    }
 
     std::lock_guard<std::mutex> lock(keyframe_queue_mutex);
     keyframe_queue.push_back(keyframe);
@@ -284,6 +348,70 @@ private:
   }
 
   /**
+   * @brief RTK Yaw callback - stores latest yaw angle from attitude quaternion
+   * @param msg geometry_msgs::QuaternionStamped - attitude quaternion (ROS ENU frame)
+   *
+   * The /dji_osdk_ros/attitude topic provides quaternion already in ROS ENU coordinate system
+   * (0=East, counter-clockwise), so no coordinate conversion is needed.
+   */
+  void rtk_yaw_callback(const geometry_msgs::QuaternionStampedConstPtr& msg) {
+    std::lock_guard<std::mutex> lock(rtk_yaw_mutex);
+
+    // Validate quaternion - check for zero quaternion
+    if (msg->quaternion.x == 0.0 && msg->quaternion.y == 0.0 &&
+        msg->quaternion.z == 0.0 && msg->quaternion.w == 0.0) {
+      ROS_WARN_THROTTLE(10.0, "Received invalid attitude quaternion (0,0,0,0)");
+      return;
+    }
+
+    // Convert to tf2 Quaternion and extract yaw
+    tf2::Quaternion quat_tf;
+    tf2::fromMsg(msg->quaternion, quat_tf);
+
+    double roll, pitch, yaw;
+    tf2::Matrix3x3(quat_tf).getRPY(roll, pitch, yaw);
+
+    // NaN check
+    if (std::isnan(yaw)) {
+      ROS_WARN_THROTTLE(10.0, "Extracted yaw is NaN");
+      return;
+    }
+
+    // Store yaw directly (ROS ENU: 0=East, counter-clockwise)
+    // No coordinate conversion needed since attitude is already in ROS ENU frame
+    latest_rtk_yaw_rad = yaw;
+
+    ROS_DEBUG_THROTTLE(1.0, "Attitude: yaw=%.2f deg", yaw * 180.0 / M_PI);
+  }
+
+  /**
+   * @brief Compensate GNSS antenna position to drone_base position
+   * @param gnss_enu GNSS antenna position in ENU coordinates
+   * @param yaw_rad Drone yaw angle in radians (ENU frame)
+   * @return drone_base position in ENU coordinates
+   */
+  Eigen::Vector3d compensate_gnss_to_drone_base(const Eigen::Vector3d& gnss_enu,
+                                                  double yaw_rad) {
+    // Rotate offset from drone_base frame to ENU frame
+    // 2D rotation matrix (yaw only, Z-up)
+    Eigen::Matrix2d R;
+    R << std::cos(yaw_rad), -std::sin(yaw_rad),
+         std::sin(yaw_rad),  std::cos(yaw_rad);
+
+    // Rotate XY offset
+    Eigen::Vector2d offset_xy_base = gnss_antenna_offset.head<2>();  // [0.3, 0.3]
+    Eigen::Vector2d offset_xy_enu = R * offset_xy_base;
+    //Eigen::Vector2d offset_xy_enu = offset_xy_base;
+
+    // Apply offset to GNSS position
+    Eigen::Vector3d drone_base_enu = gnss_enu;
+    drone_base_enu.head<2>() += offset_xy_enu;
+    drone_base_enu.z() += gnss_antenna_offset.z();  // Z offset (0.0 in this case)
+
+    return drone_base_enu;
+  }
+
+  /**
    * @brief
    * @return
    */
@@ -324,19 +452,134 @@ private:
         continue;
       }
 
-      // convert (latitude, longitude, altitude) -> (easting, northing, altitude) in UTM coordinate
-      geodesy::UTMPoint utm;
-      geodesy::fromMsg((*closest_gps)->position, utm);
-      Eigen::Vector3d xyz(utm.easting, utm.northing, utm.altitude);
-      Eigen::Vector3d lla((*closest_gps)->position.latitude, (*closest_gps)->position.longitude, (*closest_gps)->position.altitude);
-      // the first gps data position will be the origin of the map
-      if(!zero_utm) {
-        zero_utm = xyz;
-      }
-      xyz -= (*zero_utm);
+      // Convert GPS coordinates based on origin mode
+      Eigen::Vector3d gnss_enu;  // GNSS antenna position in ENU
+      Eigen::Vector3d lla((*closest_gps)->position.latitude,
+                         (*closest_gps)->position.longitude,
+                         (*closest_gps)->position.altitude);
 
-      keyframe->utm_coord = xyz;
-      keyframe->lla_coord = lla;
+      // Convert GNSS antenna LLA to ENU
+      if (gps_origin_mode_ == "base_point") {
+        // base_point mode: PROJ library LLA→ENU conversion
+        gnss_enu = base_point_transformer_->convertLLAtoENU(lla[0], lla[1], lla[2]);
+      } else {
+        // utm mode: existing UTM-based implementation
+        geodesy::UTMPoint utm;
+        geodesy::fromMsg((*closest_gps)->position, utm);
+        gnss_enu = Eigen::Vector3d(utm.easting, utm.northing, utm.altitude);
+
+        // The first GPS data position will be the origin of the map
+        if(!zero_utm) {
+          zero_utm = gnss_enu;
+        }
+        gnss_enu -= (*zero_utm);
+      }
+
+      // Compensate GNSS antenna position to drone_base position
+      Eigen::Vector3d xyz;  // drone_base position in ENU
+      {
+        std::lock_guard<std::mutex> lock(rtk_yaw_mutex);
+        if (latest_rtk_yaw_rad) {
+          // Apply GNSS antenna offset compensation
+          xyz = compensate_gnss_to_drone_base(gnss_enu, *latest_rtk_yaw_rad);
+          ROS_DEBUG_STREAM("GNSS compensation: yaw=" << (*latest_rtk_yaw_rad * 180.0 / M_PI)
+                           << "deg, offset=" << (xyz - gnss_enu).transpose());
+        } else {
+          // Fallback: use GNSS antenna position directly
+          xyz = gnss_enu;
+          ROS_WARN_THROTTLE(10.0, "RTK yaw not available, using GNSS antenna position directly");
+        }
+      }
+
+      keyframe->utm_coord = xyz;  // Store drone_base position
+      keyframe->lla_coord = lla;  // Store original GNSS LLA for reference
+      keyframe->gps_timestamp = (*closest_gps)->header.stamp;  // Record GPS timestamp used
+
+      // Time interpolation for GPS coordinates
+      auto gps_before = gps_queue.end();
+      auto gps_after = gps_queue.end();
+      for(auto gps = gps_queue.begin(); gps != gps_queue.end(); gps++) {
+        if((*gps)->header.stamp <= keyframe->stamp) {
+          gps_before = gps;
+        }
+        if((*gps)->header.stamp >= keyframe->stamp && gps_after == gps_queue.end()) {
+          gps_after = gps;
+        }
+      }
+
+      if(gps_before != gps_queue.end() && gps_after != gps_queue.end() && gps_before != gps_after) {
+        // Linear interpolation
+        double t1 = (*gps_before)->header.stamp.toSec();
+        double t2 = (*gps_after)->header.stamp.toSec();
+        double t = keyframe->stamp.toSec();
+        double alpha = (t - t1) / (t2 - t1);
+
+        Eigen::Vector3d gnss_enu1, gnss_enu2;
+
+        // Convert both GPS points to ENU
+        if (gps_origin_mode_ == "base_point") {
+          // base_point mode: PROJ library LLA→ENU conversion
+          gnss_enu1 = base_point_transformer_->convertLLAtoENU(
+              (*gps_before)->position.latitude,
+              (*gps_before)->position.longitude,
+              (*gps_before)->position.altitude);
+
+          gnss_enu2 = base_point_transformer_->convertLLAtoENU(
+              (*gps_after)->position.latitude,
+              (*gps_after)->position.longitude,
+              (*gps_after)->position.altitude);
+        } else {
+          // utm mode: existing UTM-based implementation
+          geodesy::UTMPoint utm1, utm2;
+          geodesy::fromMsg((*gps_before)->position, utm1);
+          geodesy::fromMsg((*gps_after)->position, utm2);
+
+          gnss_enu1 = Eigen::Vector3d(utm1.easting, utm1.northing, utm1.altitude);
+          gnss_enu2 = Eigen::Vector3d(utm2.easting, utm2.northing, utm2.altitude);
+          gnss_enu1 -= (*zero_utm);
+          gnss_enu2 -= (*zero_utm);
+        }
+
+        // Apply GNSS compensation to both points, then interpolate
+        Eigen::Vector3d drone_base1, drone_base2;
+        {
+          std::lock_guard<std::mutex> lock(rtk_yaw_mutex);
+          if (latest_rtk_yaw_rad) {
+            drone_base1 = compensate_gnss_to_drone_base(gnss_enu1, *latest_rtk_yaw_rad);
+            drone_base2 = compensate_gnss_to_drone_base(gnss_enu2, *latest_rtk_yaw_rad);
+          } else {
+            // Fallback
+            drone_base1 = gnss_enu1;
+            drone_base2 = gnss_enu2;
+          }
+        }
+
+        // Linear interpolation in ENU space
+        Eigen::Vector3d xyz_interpolated = drone_base1 + alpha * (drone_base2 - drone_base1);
+
+        Eigen::Vector3d lla1((*gps_before)->position.latitude, (*gps_before)->position.longitude, (*gps_before)->position.altitude);
+        Eigen::Vector3d lla2((*gps_after)->position.latitude, (*gps_after)->position.longitude, (*gps_after)->position.altitude);
+        Eigen::Vector3d lla_interpolated = lla1 + alpha * (lla2 - lla1);
+
+        keyframe->utm_coord_interpolated = xyz_interpolated;
+        keyframe->lla_coord_interpolated = lla_interpolated;
+        keyframe->gps_timestamp_before = (*gps_before)->header.stamp;
+        keyframe->gps_timestamp_after = (*gps_after)->header.stamp;
+
+        ROS_DEBUG_STREAM("GPS Interpolation: KF=" << keyframe->stamp.toSec()
+                         << ", GPS=[" << t1 << ", " << t2 << "], alpha=" << alpha
+                         << ", dt_before=" << (keyframe->stamp - (*gps_before)->header.stamp).toSec()
+                         << ", dt_after=" << ((*gps_after)->header.stamp - keyframe->stamp).toSec());
+      } else {
+        // No interpolation possible, use closest GPS data
+        keyframe->utm_coord_interpolated = xyz;
+        keyframe->lla_coord_interpolated = lla;
+
+        double dt_gps = ((*closest_gps)->header.stamp - keyframe->stamp).toSec();
+        ROS_DEBUG_STREAM("No GPS Interpolation: KF=" << keyframe->stamp.toSec()
+                         << ", closest_GPS=" << (*closest_gps)->header.stamp.toSec()
+                         << ", dt=" << dt_gps << "s");
+      }
 
       g2o::OptimizableGraph::Edge* edge;
       if(std::isnan(xyz.z())) {
@@ -1062,6 +1305,22 @@ private:
   boost::optional<Eigen::Vector3d> zero_utm;
   std::mutex gps_queue_mutex;
   std::deque<geographic_msgs::GeoPointStampedConstPtr> gps_queue;
+
+  // GPS origin mode
+  std::string gps_origin_mode_;  // "utm" or "base_point"
+  std::unique_ptr<BasePointTransformer> base_point_transformer_;
+  double base_point_latitude_;
+  double base_point_longitude_;
+  double base_point_altitude_;
+
+  // RTK Yaw subscription for GNSS antenna offset compensation
+  ros::Subscriber rtk_yaw_sub;
+  std::mutex rtk_yaw_mutex;
+  boost::optional<double> latest_rtk_yaw_rad;  // ラジアン単位で保存
+
+  // GNSS antenna offset from drone_base (meters)
+  // drone_base → gnss = (-0.3, -0.3, 0.0) in drone_base frame
+  Eigen::Vector3d gnss_antenna_offset;  // gnss → drone_base in ENU
 
   // imu queue
   double imu_time_offset;
